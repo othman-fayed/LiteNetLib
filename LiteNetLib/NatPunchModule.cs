@@ -164,7 +164,7 @@ namespace LiteNetLib
             dw.Put(additionalInfo, MaxTokenLength);
             // Get Internet IP
             var publicIp = NetUtils.GetPublicIPAddress();
-            IPEndPoint internetEndpoint = NetUtils.MakeEndPoint(publicIp, _socket.LocalPort);
+            IPEndPoint internetEndpoint = NetUtils.MakeEndPoint(publicIp, 0);
             dw.Put(internetEndpoint);
             //
 
@@ -231,8 +231,11 @@ namespace LiteNetLib
             NetDebug.Write(NetLogLevel.Trace, "[NAT] external punch sent to " + remoteExternal);
 
             // send internet punch if different
-            if (internetExternal != remoteExternal)
+            if (!internetExternal.Address.Equals(remoteExternal.Address))
             {
+                // update internet port to remote
+                internetExternal.Port = remoteExternal.Port;
+
                 writer.Reset();
                 writer.Put((byte)PacketProperty.NatPunchMessage);
                 writer.Put(hostByte);

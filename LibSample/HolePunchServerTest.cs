@@ -10,6 +10,7 @@ namespace LibSample
     {
         public IPEndPoint InternalAddr { get; private set; }
         public IPEndPoint ExternalAddr { get; private set; }
+        public IPEndPoint InternetAddr { get; private set; }
         public DateTime RefreshTime { get; private set; }
 
         public void Refresh()
@@ -17,11 +18,12 @@ namespace LibSample
             RefreshTime = DateTime.Now;
         }
 
-        public WaitPeer(IPEndPoint internalAddr, IPEndPoint externalAddr)
+        public WaitPeer(IPEndPoint internalAddr, IPEndPoint externalAddr, IPEndPoint internetAddr)
         {
             Refresh();
             InternalAddr = internalAddr;
             ExternalAddr = externalAddr;
+            InternetAddr = internetAddr;
         }
     }
 
@@ -37,7 +39,11 @@ namespace LibSample
         private NetManager _c1;
         private NetManager _c2;
 
-        void INatPunchListener.OnNatIntroductionRequest(IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, string token, IPEndPoint internetEndPoint)
+        void INatPunchListener.OnNatIntroductionRequest(
+            IPEndPoint localEndPoint, 
+            IPEndPoint remoteEndPoint, 
+            string token, 
+            IPEndPoint internetEndPoint)
         {
             WaitPeer wpeer;
             if (_waitingPeers.TryGetValue(token, out wpeer))
@@ -53,16 +59,15 @@ namespace LibSample
 
                 //found in list - introduce client and host to eachother
                 Console.WriteLine(
-                    "host - i({0}) e({1})\nclient - i({2}) e({3})",
-                    wpeer.InternalAddr,
-                    wpeer.ExternalAddr,
-                    localEndPoint,
-                    remoteEndPoint);
+                    $"host - i({wpeer.InternalAddr}) e({wpeer.ExternalAddr}) p({wpeer.InternetAddr})" +
+                    $"\n" +
+                    $"client - i({localEndPoint}) e({remoteEndPoint}) i({internetEndPoint})"
+                    );
 
                 _puncher.NatPunchModule.NatIntroduce(
                     wpeer.InternalAddr, // host internal
                     wpeer.ExternalAddr, // host external
-                    wpeer.InternalAddr, 
+                    wpeer.InternetAddr,
                     localEndPoint, // client internal
                     remoteEndPoint, // client external
                     internetEndPoint,
@@ -74,8 +79,8 @@ namespace LibSample
             }
             else
             {
-                Console.WriteLine("Wait peer created. i({0}) e({1})", localEndPoint, remoteEndPoint);
-                _waitingPeers[token] = new WaitPeer(localEndPoint, remoteEndPoint);
+                Console.WriteLine("Wait peer created. i({0}) e({1}) p({2})", localEndPoint, remoteEndPoint, internetEndPoint);
+                _waitingPeers[token] = new WaitPeer(localEndPoint, remoteEndPoint, internetEndPoint);
             }
         }
 
