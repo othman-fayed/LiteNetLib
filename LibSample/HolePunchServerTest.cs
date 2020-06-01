@@ -37,7 +37,7 @@ namespace LibSample
         private NetManager _c1;
         private NetManager _c2;
 
-        void INatPunchListener.OnNatIntroductionRequest(IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, string token)
+        void INatPunchListener.OnNatIntroductionRequest(IPEndPoint localEndPoint, IPEndPoint remoteEndPoint, string token, IPEndPoint internetEndPoint)
         {
             WaitPeer wpeer;
             if (_waitingPeers.TryGetValue(token, out wpeer))
@@ -62,8 +62,10 @@ namespace LibSample
                 _puncher.NatPunchModule.NatIntroduce(
                     wpeer.InternalAddr, // host internal
                     wpeer.ExternalAddr, // host external
+                    wpeer.InternalAddr, 
                     localEndPoint, // client internal
                     remoteEndPoint, // client external
+                    internetEndPoint,
                     token // request token
                     );
 
@@ -132,12 +134,14 @@ namespace LibSample
             _c2.Start();
 
             _puncher = new NetManager(netListener);
-            _puncher.Start(ServerPort);
+            _puncher.Start();
             _puncher.NatPunchEnabled = true;
             _puncher.NatPunchModule.Init(this);
 
-            _c1.NatPunchModule.SendNatIntroduceRequest(NetUtils.MakeEndPoint("::1", ServerPort), "token1");
-            _c2.NatPunchModule.SendNatIntroduceRequest(NetUtils.MakeEndPoint("::1", ServerPort), "token1");
+            var serverPort = _puncher.LocalPort;
+
+            _c1.NatPunchModule.SendNatIntroduceRequest(NetUtils.MakeEndPoint("::1", serverPort), "token1");
+            _c2.NatPunchModule.SendNatIntroduceRequest(NetUtils.MakeEndPoint("::1", serverPort), "token1");
 
             // keep going until ESCAPE is pressed
             Console.WriteLine("Press ESC to quit");

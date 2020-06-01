@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.NetworkInformation;
+using System.IO;
 
 namespace LiteNetLib
 {
@@ -192,6 +193,39 @@ namespace LiteNetLib
         internal static int RelativeSequenceNumber(int number, int expected)
         {
             return (number - expected + NetConstants.MaxSequence + NetConstants.HalfMaxSequence) % NetConstants.MaxSequence - NetConstants.HalfMaxSequence;
+        }
+
+
+        public static string GetPublicIPAddress()
+        {
+            //// NOTE: We are caching the result
+            //if (previousPublicIpAddress != null)
+            //{
+            //    return previousPublicIpAddress;
+            //}
+
+            string address = null;
+            try
+            {
+                WebRequest request = WebRequest.Create("http://checkip.dyndns.org/");
+                using (WebResponse response = request.GetResponse())
+                {
+                    using (StreamReader stream = new StreamReader(response.GetResponseStream()))
+                    {
+                        address = stream.ReadToEnd();
+                    }
+                }
+                int first = address.IndexOf("Address: ") + 9;
+                int last = address.LastIndexOf("</body>");
+                address = address.Substring(first, last - first);
+                //previousPublicIpAddress = address;
+            }
+            catch (Exception)
+            {
+                // Handle connectivity errors
+            }
+
+            return address;
         }
     }
 }
