@@ -194,7 +194,7 @@ namespace LiteNetLib
             writer.Put(token);
             if (hostByte == HostByte)
             {
-                _socket.Ttl = 2;
+                _socket.Ttl = NetConstants.NatPunchHostSocketTTL;
                 _socket.SendTo(writer.Data, 0, writer.Length, remoteExternal, ref errorCode);
                 _socket.Ttl = NetConstants.SocketTTL;
             }

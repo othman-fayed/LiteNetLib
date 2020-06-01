@@ -41,6 +41,14 @@
         public const int SocketBufferSize = 1024 * 1024; //1mb
         public const int SocketTTL = 255;
 
+        /// <summary>
+        /// The socket.Ttl used when host is trying to Nat Punch to other client. Was originally set to 2. 
+        /// Now, it can be modified by executing library.
+        /// Defaulting to 30
+        /// ref: https://ns1.com/blog/what-is-the-lowest-ttl-i-can-get-away-with
+        /// </summary>
+        public static short NatPunchHostSocketTTL = 30;   // TODO: Might vary per router so need to handle differently
+
         public const int HeaderSize = 1;
         public const int ChanneledHeaderSize = 4;
         public const int FragmentHeaderSize = 6;
