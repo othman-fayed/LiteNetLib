@@ -15,13 +15,20 @@ namespace LibSample
         private const string ConnectionKey = "natpunch_key";
         private static readonly TimeSpan KickTime = TimeSpan.FromMinutes(2);
 
-        private static void Log(string tag, string msg) =>
-            Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}][{tag}] {msg}");
+        public static bool Verbose = false;
+
+        private static void Log(string tag, string msg)
+        {
+            if (Verbose)
+                Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}][{tag}] {msg}");
+        }
+
+        private static void Info(string msg) => Console.WriteLine(msg);
 
         public static void RunServer()
         {
-            Log("Server", "=== NAT Punch Relay Server ===");
-            Log("Server", $"Listening on UDP port {ServerPort}. Token: \"{Token}\"  KickTime: {KickTime.TotalSeconds}s");
+            Info($"=== NAT Punch Relay Server ===  port={ServerPort}  token=\"{Token}\"");
+            Log("Server", $"KickTime: {KickTime.TotalSeconds}s");
 
             var netListener = new EventBasedNetListener();
             netListener.ConnectionRequestEvent += req =>
@@ -46,29 +53,29 @@ namespace LibSample
 
                 if (waitingPeers.TryGetValue(token, out var wpeer))
                 {
-                    Log("Server", $"  Waiting peer exists for token={token}  stored_internal={wpeer.InternalAddr}  stored_external={wpeer.ExternalAddr}");
+                    Log("Server", $"  Waiting peer exists  stored_internal={wpeer.InternalAddr}  stored_external={wpeer.ExternalAddr}");
 
-                    // same peer refreshing — match on external addr only (internal may differ on retry)
                     if (wpeer.ExternalAddr.Equals(remoteEndPoint))
                     {
-                        Log("Server", $"  Same peer refresh (external match) — refreshing timestamp");
+                        Log("Server", "  Same peer refresh (external match) — refreshing timestamp");
                         wpeer.Refresh();
                         return;
                     }
 
-                    Log("Server", $"  Different external addr — treating as second peer. Introducing...");
+                    Log("Server", $"  Second peer arrived — introducing");
                     Log("Server", $"  PeerA: internal={wpeer.InternalAddr}  external={wpeer.ExternalAddr}");
                     Log("Server", $"  PeerB: internal={localEndPoint}  external={remoteEndPoint}");
                     server.NatPunchModule.NatIntroduce(
                         wpeer.InternalAddr, wpeer.ExternalAddr,
                         localEndPoint,      remoteEndPoint,
                         token);
-                    Log("Server", $"  NatIntroduce sent. Removing token={token} from waiting list.");
+                    Info($"[Server] Introduced peers for token={token}");
                     waitingPeers.Remove(token);
                 }
                 else
                 {
-                    Log("Server", $"  No waiting peer for token={token} — registering as first peer.");
+                    Info($"[Server] First peer waiting  token={token}  external={remoteEndPoint}");
+                    Log("Server", $"  internal={localEndPoint}");
                     waitingPeers[token] = new WaitPeer(localEndPoint, remoteEndPoint);
                     Log("Server", $"  WaitingPeers count: {waitingPeers.Count}");
                 }
@@ -76,7 +83,7 @@ namespace LibSample
 
             server.NatPunchModule.Init(natListener);
 
-            Log("Server", "Running. Press ESC to stop.");
+            Info("Press ESC to stop.");
             int tickCount = 0;
             while (true)
             {
@@ -88,37 +95,35 @@ namespace LibSample
 
                 var now = DateTime.UtcNow;
                 foreach (var kv in waitingPeers)
-                {
-                    var age = now - kv.Value.RefreshTime;
-                    if (age > KickTime)
+                    if (now - kv.Value.RefreshTime > KickTime)
                         peersToRemove.Add(kv.Key);
-                }
 
                 foreach (var key in peersToRemove)
                 {
-                    Log("Server", $"Stale peer removed: token={key} (age exceeded {KickTime.TotalSeconds}s)");
+                    Info($"[Server] Stale peer removed: token={key}");
+                    Log("Server", $"  age exceeded {KickTime.TotalSeconds}s");
                     waitingPeers.Remove(key);
                 }
                 peersToRemove.Clear();
 
-                // log waiting peer ages every ~5 seconds
                 tickCount++;
                 if (tickCount % 500 == 0 && waitingPeers.Count > 0)
                 {
                     foreach (var kv in waitingPeers)
-                        Log("Server", $"  Heartbeat: token={kv.Key}  age={(now - kv.Value.RefreshTime).TotalSeconds:F1}s  external={kv.Value.ExternalAddr}");
+                        Log("Server", $"Heartbeat: token={kv.Key}  age={(now - kv.Value.RefreshTime).TotalSeconds:F1}s  external={kv.Value.ExternalAddr}");
                 }
 
                 Thread.Sleep(10);
             }
 
             server.Stop();
-            Log("Server", "Stopped.");
+            Info("[Server] Stopped.");
         }
 
         public static void RunLocalTest()
         {
-            Log("LocalTest", "=== NAT Punch Local Test (server + 2 clients in one process) ===");
+            Info("=== NAT Punch Local Test (server + 2 clients in one process) ===");
+            Log("LocalTest", "Verbose mode on");
 
             // ---- Server ----
             var serverListener = new EventBasedNetListener();
@@ -143,12 +148,12 @@ namespace LibSample
                     }
                     Log("Server", "  Second peer arrived — calling NatIntroduce()");
                     server.NatPunchModule.NatIntroduce(wpeer.InternalAddr, wpeer.ExternalAddr, localEP, remoteEP, token);
-                    Log("Server", "  NatIntroduce sent — removing token from waiting list");
+                    Info($"[Server] Introduced peers for token={token}");
                     waitingPeers.Remove(token);
                 }
                 else
                 {
-                    Log("Server", "  First peer — registering in waiting list");
+                    Info($"[Server] First peer waiting  token={token}  external={remoteEP}");
                     waitingPeers[token] = new WaitPeer(localEP, remoteEP);
                 }
             };
@@ -161,18 +166,36 @@ namespace LibSample
                 peerRef = peerHolder;
 
                 var nl = new EventBasedNetListener();
-                nl.ConnectionRequestEvent += req => { Log(name, $"ConnectionRequest from {req.RemoteEndPoint} — accepting"); req.AcceptIfKey(ConnectionKey); };
-                nl.PeerConnectedEvent     += p  => { peerHolder[0] = p; Log(name, $"*** PeerConnected: {p.Address}:{p.Port} ***"); };
-                nl.PeerDisconnectedEvent  += (p, info) => { peerHolder[0] = null; Log(name, $"PeerDisconnected: {info.Reason}"); };
-                nl.NetworkReceiveEvent    += (p, reader, ch, method) => { Log(name, $"Recv: \"{reader.GetString()}\""); reader.Recycle(); };
-                nl.NetworkErrorEvent      += (ep, err) => Log(name, $"NetworkError {ep}: {err}");
+                nl.ConnectionRequestEvent += req =>
+                {
+                    Log(name, $"ConnectionRequest from {req.RemoteEndPoint} — accepting");
+                    req.AcceptIfKey(ConnectionKey);
+                };
+                nl.PeerConnectedEvent += p =>
+                {
+                    peerHolder[0] = p;
+                    Info($"[{name}] *** Connected to {p.Address}:{p.Port} ***");
+                    Log(name, $"PeerConnected id={p.Id}");
+                };
+                nl.PeerDisconnectedEvent += (p, info) =>
+                {
+                    peerHolder[0] = null;
+                    Log(name, $"PeerDisconnected: {info.Reason}");
+                };
+                nl.NetworkReceiveEvent += (p, reader, ch, method) =>
+                {
+                    var msg = reader.GetString();
+                    Info($"[{name}] Recv: \"{msg}\"");
+                    reader.Recycle();
+                };
+                nl.NetworkErrorEvent += (ep, err) => Log(name, $"NetworkError {ep}: {err}");
 
                 var mgr = new NetManager(nl) { NatPunchEnabled = true, IPv6Enabled = true };
 
                 var natL = new EventBasedNatPunchListener();
                 natL.NatIntroductionSuccess += (point, addrType, token) =>
                 {
-                    Log(name, $"NatIntroductionSuccess  point={point}  addrType={addrType}  token={token}");
+                    Info($"[{name}] NatIntroductionSuccess  point={point}  addrType={addrType}");
                     Log(name, $"Calling Connect({point})...");
                     var peer = mgr.Connect(point, ConnectionKey);
                     Log(name, $"Connect() returned: {(peer == null ? "null" : $"peer id={peer.Id}")}");
@@ -189,14 +212,11 @@ namespace LibSample
 
             Log("Client1", $"SendNatIntroduceRequest → localhost:{ServerPort} token={Token}");
             c1.NatPunchModule.SendNatIntroduceRequest("localhost", ServerPort, Token);
-
             Thread.Sleep(200);
-
             Log("Client2", $"SendNatIntroduceRequest → localhost:{ServerPort} token={Token}");
             c2.NatPunchModule.SendNatIntroduceRequest("localhost", ServerPort, Token);
 
-            // Poll loop for 5 seconds, show connected state
-            Log("LocalTest", "Polling for 5 seconds...");
+            Info("Polling for 5 seconds...");
             var deadline = DateTime.UtcNow.AddSeconds(5);
             bool sentMsg = false;
             while (DateTime.UtcNow < deadline)
@@ -205,32 +225,31 @@ namespace LibSample
                 c1.NatPunchModule.PollEvents();     c1.PollEvents();
                 c2.NatPunchModule.PollEvents();     c2.PollEvents();
 
-                // Once both are connected, send one test message each direction
                 if (!sentMsg && c1Peers[0] != null && c2Peers[0] != null)
                 {
                     sentMsg = true;
                     var w = new NetDataWriter();
                     w.Put("Hello from Client1!");
                     c1Peers[0].Send(w, DeliveryMethod.ReliableOrdered);
-                    Log("Client1", "Sent: \"Hello from Client1!\"");
+                    Info("[Client1] Sent: \"Hello from Client1!\"");
 
                     w.Reset(); w.Put("Hello from Client2!");
                     c2Peers[0].Send(w, DeliveryMethod.ReliableOrdered);
-                    Log("Client2", "Sent: \"Hello from Client2!\"");
+                    Info("[Client2] Sent: \"Hello from Client2!\"");
                 }
 
                 Thread.Sleep(10);
             }
 
             c1.Stop(); c2.Stop(); server.Stop();
-            Log("LocalTest", "Done.");
+            Info("Done.");
         }
 
         public static void RunClient(string serverHost = null)
         {
             serverHost ??= DefaultServerHost;
-            Log("Client", "=== NAT Punch Chat ===");
-            Log("Client", $"Relay: {serverHost}:{ServerPort}  Token: \"{Token}\"  ConnectionKey: \"{ConnectionKey}\"");
+            Info($"=== NAT Punch Chat ===  relay={serverHost}:{ServerPort}  token=\"{Token}\"");
+            Log("Client", $"ConnectionKey: \"{ConnectionKey}\"");
 
             NetManager client = null;
             NetPeer connectedPeer = null;
@@ -245,13 +264,14 @@ namespace LibSample
             netListener.PeerConnectedEvent += peer =>
             {
                 connectedPeer = peer;
-                Log("Client", $"PeerConnected: {peer.Address}:{peer.Port}  Id={peer.Id} — start typing!");
-                Console.WriteLine("[Chat] *** Connected! Start typing your message and press Enter ***");
+                Log("Client", $"PeerConnected: {peer.Address}:{peer.Port}  Id={peer.Id}");
+                Info("[Chat] *** Connected! Start typing your message and press Enter ***");
             };
             netListener.PeerDisconnectedEvent += (peer, info) =>
             {
                 connectedPeer = null;
-                Log("Client", $"PeerDisconnected: {peer.Address}:{peer.Port}  Reason={info.Reason}  SocketError={info.SocketErrorCode}");
+                Info($"[Chat] Peer disconnected: {info.Reason}");
+                Log("Client", $"PeerDisconnected: {peer.Address}:{peer.Port}  SocketError={info.SocketErrorCode}");
             };
             netListener.NetworkReceiveEvent += (peer, reader, channel, method) =>
             {
@@ -268,8 +288,8 @@ namespace LibSample
             var natListener = new EventBasedNatPunchListener();
             natListener.NatIntroductionSuccess += (point, addrType, token) =>
             {
-                Log("Client", $"NatIntroductionSuccess  point={point}  addrType={addrType}  token={token}");
-                Log("Client", $"Calling client.Connect({point}, \"{ConnectionKey}\")...");
+                Info($"[Chat] NatIntroductionSuccess  point={point}  addrType={addrType}");
+                Log("Client", $"Calling Connect({point}, \"{ConnectionKey}\")...");
                 var peer = client?.Connect(point, ConnectionKey);
                 Log("Client", $"Connect() returned: {(peer == null ? "null (already connected or failed)" : $"peer id={peer.Id}")}");
             };
@@ -279,7 +299,8 @@ namespace LibSample
             client.Start();
             Log("Client", $"UDP socket started. LocalPort={client.LocalPort}");
 
-            Log("Client", $"Sending NatIntroduceRequest to {serverHost}:{ServerPort} token={Token}");
+            Info($"[Chat] Connecting to relay {serverHost}:{ServerPort} ...");
+            Log("Client", $"SendNatIntroduceRequest token={Token}");
             client.NatPunchModule.SendNatIntroduceRequest(serverHost, ServerPort, Token);
 
             var running = true;
@@ -291,11 +312,10 @@ namespace LibSample
                     client.NatPunchModule.PollEvents();
                     client.PollEvents();
 
-                    // re-send NAT introduce request every 2s while not connected (keeps hole open)
                     tickCount++;
                     if (tickCount % 200 == 0 && connectedPeer == null)
                     {
-                        Log("Client", $"Re-sending NatIntroduceRequest (tick {tickCount}) ...");
+                        Log("Client", $"Re-sending NatIntroduceRequest (tick {tickCount})");
                         client.NatPunchModule.SendNatIntroduceRequest(serverHost, ServerPort, Token);
                     }
 
@@ -304,8 +324,8 @@ namespace LibSample
             }) { IsBackground = true };
             networkThread.Start();
 
-            Log("Client", "Network thread started. Waiting for peer...");
-            Console.WriteLine("Waiting for peer... Type /quit to exit.");
+            Log("Client", "Network thread started.");
+            Info("Waiting for peer... Type /quit to exit.");
             while (true)
             {
                 var line = Console.ReadLine();
@@ -323,7 +343,7 @@ namespace LibSample
                 }
                 else
                 {
-                    Console.WriteLine("[Chat] Not connected yet, please wait...");
+                    Info("[Chat] Not connected yet, please wait...");
                 }
             }
 

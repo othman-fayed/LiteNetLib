@@ -20,6 +20,11 @@ namespace LibSample
         {
             if (args.Length >= 2 && args[0].Equals("natpunch", StringComparison.OrdinalIgnoreCase))
             {
+                // check for --verbose / -v anywhere in the args
+                foreach (var a in args)
+                    if (a.Equals("--verbose", StringComparison.OrdinalIgnoreCase) || a.Equals("-v", StringComparison.OrdinalIgnoreCase))
+                        NatPunchStandaloneTest.Verbose = true;
+
                 if (args[1].Equals("server", StringComparison.OrdinalIgnoreCase))
                 {
                     NatPunchStandaloneTest.RunServer();
@@ -27,7 +32,7 @@ namespace LibSample
                 }
                 if (args[1].Equals("client", StringComparison.OrdinalIgnoreCase))
                 {
-                    NatPunchStandaloneTest.RunClient(args.Length >= 3 ? args[2] : null);
+                    NatPunchStandaloneTest.RunClient(args.Length >= 3 && !args[2].StartsWith("-") ? args[2] : null);
                     return;
                 }
                 if (args[1].Equals("localtest", StringComparison.OrdinalIgnoreCase))
@@ -36,9 +41,10 @@ namespace LibSample
                     return;
                 }
                 Console.WriteLine("Usage:");
-                Console.WriteLine("  natpunch server");
-                Console.WriteLine("  natpunch client [relay-server-host]  (default: 37.34.188.126)");
-                Console.WriteLine("  natpunch localtest    (run server+2 clients in one process to see all logs)");
+                Console.WriteLine("  natpunch server [-v]");
+                Console.WriteLine("  natpunch client [relay-server-host] [-v]  (default host: 37.34.188.126)");
+                Console.WriteLine("  natpunch localtest [-v]");
+                Console.WriteLine("  -v / --verbose   show detailed timestamped logs");
                 return;
             }
 
