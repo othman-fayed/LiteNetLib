@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Threading;
 using LiteNetLib;
@@ -14,6 +15,13 @@ namespace LibSample
         private const string Token = "test_room_1";
         private const string ConnectionKey = "natpunch_key";
         private static readonly TimeSpan KickTime = TimeSpan.FromMinutes(2);
+        private const int FileChunkSize = 32 * 1024; // 32 KB per chunk
+
+        // Message type prefix byte
+        private const byte MSG_TEXT       = 0;
+        private const byte MSG_FILE_START = 1; // filename (string), totalBytes (int), totalChunks (int)
+        private const byte MSG_FILE_CHUNK = 2; // chunkIndex (int), data (bytes with length)
+        private const byte MSG_FILE_END   = 3; // totalChunks (int)
 
         public static bool Verbose = false;
 
@@ -25,6 +33,146 @@ namespace LibSample
 
         private static void Info(string msg) => Console.WriteLine(msg);
 
+        // -------------------------------------------------------------------------
+        // File receive state (per connection — single peer assumed)
+        // -------------------------------------------------------------------------
+        private class FileReceiveState
+        {
+            public string FileName;
+            public int TotalBytes;
+            public int TotalChunks;
+            public byte[] Buffer;
+            public int BytesReceived;
+            public int ChunksReceived;
+        }
+
+        // -------------------------------------------------------------------------
+        // Shared receive handler — returns true if caller should print [Peer] text
+        // -------------------------------------------------------------------------
+        private static FileReceiveState _fileReceive;
+
+        private static void HandleReceive(NetDataReader reader, string logTag)
+        {
+            var type = reader.GetByte();
+            switch (type)
+            {
+                case MSG_TEXT:
+                    Console.WriteLine($"[Peer] {reader.GetString()}");
+                    break;
+
+                case MSG_FILE_START:
+                    var fname     = reader.GetString();
+                    var totalB    = reader.GetInt();
+                    var totalC    = reader.GetInt();
+                    _fileReceive  = new FileReceiveState
+                    {
+                        FileName      = fname,
+                        TotalBytes    = totalB,
+                        TotalChunks   = totalC,
+                        Buffer        = new byte[totalB],
+                        BytesReceived = 0,
+                        ChunksReceived = 0,
+                    };
+                    Info($"[File] Incoming: \"{fname}\"  {totalB:#,0} bytes  {totalC} chunks");
+                    Log(logTag, $"FILE_START name={fname} totalBytes={totalB} totalChunks={totalC}");
+                    break;
+
+                case MSG_FILE_CHUNK:
+                    if (_fileReceive == null) { Info("[File] ERROR: chunk received but no active transfer"); break; }
+                    var chunkIdx  = reader.GetInt();
+                    var chunkData = reader.GetBytesWithLength();
+                    int offset    = chunkIdx * FileChunkSize;
+                    Array.Copy(chunkData, 0, _fileReceive.Buffer, offset, chunkData.Length);
+                    _fileReceive.BytesReceived  += chunkData.Length;
+                    _fileReceive.ChunksReceived += 1;
+                    Log(logTag, $"FILE_CHUNK [{chunkIdx}/{_fileReceive.TotalChunks - 1}]  {chunkData.Length} bytes");
+                    // simple progress every 10 chunks
+                    if (_fileReceive.ChunksReceived % 10 == 0 || _fileReceive.ChunksReceived == _fileReceive.TotalChunks)
+                        Info($"[File] Progress: {_fileReceive.BytesReceived:#,0}/{_fileReceive.TotalBytes:#,0} bytes");
+                    break;
+
+                case MSG_FILE_END:
+                    var sentChunks = reader.GetInt();
+                    if (_fileReceive == null) { Info("[File] ERROR: end received but no active transfer"); break; }
+                    Log(logTag, $"FILE_END sentChunks={sentChunks} receivedChunks={_fileReceive.ChunksReceived}");
+                    var savePath = Path.Combine(Directory.GetCurrentDirectory(), _fileReceive.FileName);
+                    // avoid overwriting — append a counter if file exists
+                    if (File.Exists(savePath))
+                    {
+                        var stem = Path.GetFileNameWithoutExtension(_fileReceive.FileName);
+                        var ext  = Path.GetExtension(_fileReceive.FileName);
+                        int n = 1;
+                        while (File.Exists(savePath))
+                            savePath = Path.Combine(Directory.GetCurrentDirectory(), $"{stem}({n++}){ext}");
+                    }
+                    File.WriteAllBytes(savePath, _fileReceive.Buffer);
+                    Info($"[File] Saved: {savePath}  ({_fileReceive.BytesReceived:#,0} bytes)");
+                    _fileReceive = null;
+                    break;
+
+                default:
+                    Log(logTag, $"Unknown message type {type} — ignoring");
+                    break;
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // File send helper
+        // -------------------------------------------------------------------------
+        private static void SendFile(string path, NetPeer peer, string logTag)
+        {
+            if (!File.Exists(path))
+            {
+                Info($"[File] Not found: {path}");
+                return;
+            }
+
+            var data       = File.ReadAllBytes(path);
+            var filename   = Path.GetFileName(path);
+            int totalChunks = (data.Length + FileChunkSize - 1) / FileChunkSize;
+            if (totalChunks == 0) totalChunks = 1;
+
+            Info($"[File] Sending \"{filename}\"  {data.Length:#,0} bytes  {totalChunks} chunks...");
+            Log(logTag, $"SendFile path={path} size={data.Length} chunks={totalChunks}");
+
+            var w = new NetDataWriter();
+
+            // FILE_START
+            w.Reset();
+            w.Put(MSG_FILE_START);
+            w.Put(filename);
+            w.Put(data.Length);
+            w.Put(totalChunks);
+            peer.Send(w, DeliveryMethod.ReliableOrdered);
+
+            // FILE_CHUNKs
+            for (int i = 0; i < totalChunks; i++)
+            {
+                int start     = i * FileChunkSize;
+                int len       = Math.Min(FileChunkSize, data.Length - start);
+                var chunk     = new byte[len];
+                Array.Copy(data, start, chunk, 0, len);
+
+                w.Reset();
+                w.Put(MSG_FILE_CHUNK);
+                w.Put(i);
+                w.PutBytesWithLength(chunk);
+                peer.Send(w, DeliveryMethod.ReliableOrdered);
+                Log(logTag, $"Sent chunk [{i}/{totalChunks - 1}]  {len} bytes");
+            }
+
+            // FILE_END
+            w.Reset();
+            w.Put(MSG_FILE_END);
+            w.Put(totalChunks);
+            peer.Send(w, DeliveryMethod.ReliableOrdered);
+
+            Info($"[File] Sent \"{filename}\" ({totalChunks} chunks).");
+        }
+
+        // =========================================================================
+        // SERVER
+        // =========================================================================
         public static void RunServer()
         {
             Info($"=== NAT Punch Relay Server ===  port={ServerPort}  token=\"{Token}\"");
@@ -120,12 +268,14 @@ namespace LibSample
             Info("[Server] Stopped.");
         }
 
+        // =========================================================================
+        // LOCAL TEST
+        // =========================================================================
         public static void RunLocalTest()
         {
             Info("=== NAT Punch Local Test (server + 2 clients in one process) ===");
             Log("LocalTest", "Verbose mode on");
 
-            // ---- Server ----
             var serverListener = new EventBasedNetListener();
             serverListener.NetworkErrorEvent += (ep, err) => Log("Server", $"NetworkError {ep}: {err}");
 
@@ -159,7 +309,6 @@ namespace LibSample
             };
             server.NatPunchModule.Init(serverNat);
 
-            // ---- Client factory ----
             NetManager MakeClient(string name, out NetPeer[] peerRef)
             {
                 var peerHolder = new NetPeer[1];
@@ -184,14 +333,12 @@ namespace LibSample
                 };
                 nl.NetworkReceiveEvent += (p, reader, ch, method) =>
                 {
-                    var msg = reader.GetString();
-                    Info($"[{name}] Recv: \"{msg}\"");
+                    HandleReceive(reader, name);
                     reader.Recycle();
                 };
                 nl.NetworkErrorEvent += (ep, err) => Log(name, $"NetworkError {ep}: {err}");
 
                 var mgr = new NetManager(nl) { NatPunchEnabled = true, IPv6Enabled = true };
-
                 var natL = new EventBasedNatPunchListener();
                 natL.NatIntroductionSuccess += (point, addrType, token) =>
                 {
@@ -229,13 +376,14 @@ namespace LibSample
                 {
                     sentMsg = true;
                     var w = new NetDataWriter();
-                    w.Put("Hello from Client1!");
-                    c1Peers[0].Send(w, DeliveryMethod.ReliableOrdered);
-                    Info("[Client1] Sent: \"Hello from Client1!\"");
 
-                    w.Reset(); w.Put("Hello from Client2!");
+                    w.Reset(); w.Put(MSG_TEXT); w.Put("Hello from Client1!");
+                    c1Peers[0].Send(w, DeliveryMethod.ReliableOrdered);
+                    Info("[Client1] Sent text: \"Hello from Client1!\"");
+
+                    w.Reset(); w.Put(MSG_TEXT); w.Put("Hello from Client2!");
                     c2Peers[0].Send(w, DeliveryMethod.ReliableOrdered);
-                    Info("[Client2] Sent: \"Hello from Client2!\"");
+                    Info("[Client2] Sent text: \"Hello from Client2!\"");
                 }
 
                 Thread.Sleep(10);
@@ -245,10 +393,14 @@ namespace LibSample
             Info("Done.");
         }
 
+        // =========================================================================
+        // CLIENT
+        // =========================================================================
         public static void RunClient(string serverHost = null)
         {
             serverHost ??= DefaultServerHost;
             Info($"=== NAT Punch Chat ===  relay={serverHost}:{ServerPort}  token=\"{Token}\"");
+            Info("Commands: /file <path>  /quit");
             Log("Client", $"ConnectionKey: \"{ConnectionKey}\"");
 
             NetManager client = null;
@@ -265,7 +417,7 @@ namespace LibSample
             {
                 connectedPeer = peer;
                 Log("Client", $"PeerConnected: {peer.Address}:{peer.Port}  Id={peer.Id}");
-                Info("[Chat] *** Connected! Start typing your message and press Enter ***");
+                Info("[Chat] *** Connected! Type a message or /file <path> to send a file ***");
             };
             netListener.PeerDisconnectedEvent += (peer, info) =>
             {
@@ -275,9 +427,8 @@ namespace LibSample
             };
             netListener.NetworkReceiveEvent += (peer, reader, channel, method) =>
             {
-                var msg = reader.GetString();
-                Log("Client", $"NetworkReceive from {peer.Address}:{peer.Port}  channel={channel}  method={method}  len={msg.Length}");
-                Console.WriteLine($"[Peer] {msg}");
+                Log("Client", $"NetworkReceive from {peer.Address}:{peer.Port}  channel={channel}  method={method}");
+                HandleReceive(reader, "Client");
                 reader.Recycle();
             };
             netListener.NetworkErrorEvent += (ep, err) =>
@@ -334,16 +485,24 @@ namespace LibSample
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
 
-                if (connectedPeer != null)
+                if (connectedPeer == null)
                 {
-                    writer.Reset();
-                    writer.Put(line);
-                    connectedPeer.Send(writer, DeliveryMethod.ReliableOrdered);
-                    Log("Client", $"Sent message ({line.Length} chars) to {connectedPeer.Address}:{connectedPeer.Port}");
+                    Info("[Chat] Not connected yet, please wait...");
+                    continue;
+                }
+
+                if (line.StartsWith("/file ", StringComparison.OrdinalIgnoreCase))
+                {
+                    var filePath = line.Substring(6).Trim();
+                    SendFile(filePath, connectedPeer, "Client");
                 }
                 else
                 {
-                    Info("[Chat] Not connected yet, please wait...");
+                    writer.Reset();
+                    writer.Put(MSG_TEXT);
+                    writer.Put(line);
+                    connectedPeer.Send(writer, DeliveryMethod.ReliableOrdered);
+                    Log("Client", $"Sent text ({line.Length} chars)");
                 }
             }
 
